@@ -90,6 +90,25 @@ async function handleEliminationCascade(batch, gameId, eliminatedPlayerId, allPl
 
 function MyTeamTab({ myPlayer, myTeam, targetTeam, players, teams, eliminations, gameId, setError }) {
   const [markLoading, setMarkLoading] = useState({})
+  const [editingName, setEditingName] = useState(false)
+  const [newTeamName, setNewTeamName] = useState('')
+  const [nameLoading, setNameLoading] = useState(false)
+
+  async function handleRenameTeam(e) {
+    e.preventDefault()
+    const name = newTeamName.trim()
+    if (!name || !myTeam) return
+    setNameLoading(true)
+    try {
+      const { updateDoc } = await import('firebase/firestore')
+      await updateDoc(doc(db, 'games', gameId, 'teams', myTeam.id), { name })
+      setEditingName(false)
+    } catch (err) {
+      setError('Failed to rename team.')
+    } finally {
+      setNameLoading(false)
+    }
+  }
 
   const myTeamMembers = getTeamMembers(players, myTeam)
   const targetTeamMembers = getTeamMembers(players, targetTeam)
@@ -152,10 +171,41 @@ function MyTeamTab({ myPlayer, myTeam, targetTeam, players, teams, eliminations,
     <div className="space-y-6">
       {/* My Team */}
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
-        <h3 className="text-lg font-bold text-white mb-1">
-          {myTeam ? myTeam.name : 'Your Team'}
-          {myTeam?.eliminated && <span className="ml-2 text-sm text-red-400 font-normal">— Eliminated</span>}
-        </h3>
+        <div className="flex items-center gap-2 mb-1">
+          {editingName ? (
+            <form onSubmit={handleRenameTeam} className="flex gap-2 flex-1">
+              <input
+                autoFocus
+                value={newTeamName}
+                onChange={e => setNewTeamName(e.target.value)}
+                maxLength={24}
+                className="flex-1 bg-slate-700 border border-cyan-500 text-white text-sm rounded-lg px-3 py-1 focus:outline-none"
+              />
+              <button type="submit" disabled={nameLoading || !newTeamName.trim()} className="text-xs bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-600 text-white font-bold px-3 py-1 rounded-lg">
+                {nameLoading ? '...' : 'Save'}
+              </button>
+              <button type="button" onClick={() => setEditingName(false)} className="text-xs bg-slate-600 hover:bg-slate-500 text-white px-3 py-1 rounded-lg">
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <>
+              <h3 className="text-lg font-bold text-white">
+                {myTeam ? myTeam.name : 'Your Team'}
+                {myTeam?.eliminated && <span className="ml-2 text-sm text-red-400 font-normal">— Eliminated</span>}
+              </h3>
+              {myTeam && !myTeam.eliminated && (
+                <button
+                  onClick={() => { setNewTeamName(myTeam.name); setEditingName(true) }}
+                  className="text-slate-500 hover:text-cyan-400 text-xs transition-colors"
+                  title="Rename team"
+                >
+                  ✏️
+                </button>
+              )}
+            </>
+          )}
+        </div>
         <p className="text-slate-400 text-xs mb-4">Your teammates</p>
         <div className="space-y-2">
           {myTeamMembers.map(p => (
