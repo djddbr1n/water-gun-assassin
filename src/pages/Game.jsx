@@ -508,6 +508,28 @@ export default function Game() {
           )}
         </div>
 
+        {/* Rejoin link */}
+        {session && (
+          <details className="mb-4 bg-slate-800 border border-slate-700 rounded-xl">
+            <summary className="px-4 py-3 text-slate-400 text-xs cursor-pointer hover:text-slate-300 select-none">
+              🔖 Get your rejoin link (bookmark to re-enter from any device)
+            </summary>
+            <div className="px-4 pb-4 flex gap-2 mt-2">
+              <input
+                readOnly
+                value={`${window.location.origin}/rejoin/${gameId}/${session.playerId}`}
+                className="flex-1 bg-slate-700 text-slate-300 text-xs rounded-lg px-3 py-2 font-mono truncate focus:outline-none"
+              />
+              <button
+                onClick={() => navigator.clipboard.writeText(`${window.location.origin}/rejoin/${gameId}/${session.playerId}`)}
+                className="bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors"
+              >
+                Copy
+              </button>
+            </div>
+          </details>
+        )}
+
         {/* My status banner */}
         {myPlayer?.eliminated && (
           <div className="bg-red-950 border border-red-800 rounded-xl px-4 py-3 mb-6 text-center">

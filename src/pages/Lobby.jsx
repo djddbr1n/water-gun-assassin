@@ -168,6 +168,27 @@ export default function Lobby() {
           )}
         </div>
 
+        {/* Rejoin Link */}
+        {session && (
+          <div className="bg-slate-800 border border-yellow-700 rounded-2xl p-5 mb-8 shadow-lg">
+            <p className="text-yellow-400 font-semibold text-sm mb-1">🔖 Bookmark your rejoin link</p>
+            <p className="text-slate-400 text-xs mb-3">Save this link so you can get back into the game from any device, even if you close the app.</p>
+            <div className="flex gap-2">
+              <input
+                readOnly
+                value={`${window.location.origin}/rejoin/${gameId}/${session.playerId}`}
+                className="flex-1 bg-slate-700 text-slate-300 text-xs rounded-lg px-3 py-2 font-mono truncate focus:outline-none"
+              />
+              <button
+                onClick={() => navigator.clipboard.writeText(`${window.location.origin}/rejoin/${gameId}/${session.playerId}`)}
+                className="bg-yellow-600 hover:bg-yellow-500 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Start / Waiting */}
         {isAdmin ? (
           <div className="text-center">

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   collection,
@@ -11,8 +11,30 @@ import {
 import { db } from '../firebase.js'
 import { generateGameCode, getUserId, setPlayerSession } from '../utils/gameLogic.js'
 
+function getSavedSessions() {
+  const sessions = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key && key.startsWith('wga_game_')) {
+      try {
+        const data = JSON.parse(localStorage.getItem(key))
+        const gameId = key.replace('wga_game_', '')
+        if (data?.playerId && data?.name) {
+          sessions.push({ gameId, playerId: data.playerId, name: data.name })
+        }
+      } catch {}
+    }
+  }
+  return sessions
+}
+
 export default function Home() {
   const navigate = useNavigate()
+  const [savedSessions, setSavedSessions] = useState([])
+
+  useEffect(() => {
+    setSavedSessions(getSavedSessions())
+  }, [])
   const [createName, setCreateName] = useState('')
   const [createLoading, setCreateLoading] = useState(false)
   const [createError, setCreateError] = useState('')
@@ -227,6 +249,32 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      {/* Rejoin saved sessions */}
+      {savedSessions.length > 0 && (
+        <div className="w-full max-w-4xl mt-8">
+          <div className="bg-slate-800 border border-yellow-700 rounded-2xl p-6 shadow-xl">
+            <h2 className="text-lg font-bold text-yellow-400 mb-1">🔖 Rejoin a game</h2>
+            <p className="text-slate-400 text-sm mb-4">You have saved sessions on this device.</p>
+            <ul className="space-y-2">
+              {savedSessions.map(s => (
+                <li key={s.gameId} className="flex items-center justify-between bg-slate-700 rounded-lg px-4 py-3">
+                  <div>
+                    <span className="text-white font-medium">{s.name}</span>
+                    <span className="text-slate-500 text-xs ml-2 font-mono">{s.gameId.slice(0, 8)}...</span>
+                  </div>
+                  <button
+                    onClick={() => navigate(`/rejoin/${s.gameId}/${s.playerId}`)}
+                    className="bg-yellow-600 hover:bg-yellow-500 text-white text-sm font-bold px-4 py-1.5 rounded-lg transition-colors"
+                  >
+                    Rejoin
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       <p className="mt-10 text-slate-600 text-sm">Minimum 4 players required to start a game.</p>
     </div>
