@@ -1,5 +1,7 @@
 # 💧 Water Gun Assassin
 
+**Play now: [wga-sooty.vercel.app](https://wga-sooty.vercel.app)**
+
 A real-time multiplayer water gun assassination game built with React, Vite, Firebase, and Tailwind CSS. Designed for week-long games with friends.
 
 ## Game Rules
