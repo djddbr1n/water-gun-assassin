@@ -51,6 +51,13 @@ async function handleEliminationCascade(batch, gameId, eliminatedPlayerId, allPl
   // Mark the team as eliminated
   batch.update(doc(db, 'games', gameId, 'teams', eliminatedTeam.id), { eliminated: true })
 
+  // Write team eliminated activity
+  batch.set(doc(collection(db, 'games', gameId, 'activity')), {
+    type: 'team_eliminated',
+    teamName: eliminatedTeam.name,
+    createdAt: serverTimestamp(),
+  })
+
   // Find which team was targeting the eliminated team and update their target
   const attackingTeam = allTeams.find(t => t.targetTeamId === eliminatedTeam.id && !t.eliminated)
   if (attackingTeam) {
@@ -65,6 +72,11 @@ async function handleEliminationCascade(batch, gameId, eliminatedPlayerId, allPl
     batch.update(doc(db, 'games', gameId), {
       status: 'ended',
       winnerTeamId: remainingTeams[0].id,
+    })
+    batch.set(doc(collection(db, 'games', gameId, 'activity')), {
+      type: 'game_ended',
+      winnerTeamName: remainingTeams[0].name,
+      createdAt: serverTimestamp(),
     })
     return { gameEnded: true, winnerTeamId: remainingTeams[0].id }
   }
@@ -97,6 +109,14 @@ function MyTeamTab({ myPlayer, myTeam, targetTeam, players, teams, eliminations,
         status: 'confirmed',
         disputed: false,
         disputeMessage: '',
+        createdAt: serverTimestamp(),
+      })
+
+      // Write elimination activity
+      batch.set(doc(collection(db, 'games', gameId, 'activity')), {
+        type: 'elimination',
+        eliminatorName: myPlayer.name,
+        targetName: targetPlayer.name,
         createdAt: serverTimestamp(),
       })
 
@@ -456,6 +476,143 @@ function LeaderboardTab({ players, teams }) {
   )
 }
 
+// ─── Feed Tab ────────────────────────────────────────────────────────────────
+
+function FeedTab({ activity }) {
+  const sorted = [...activity].sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+
+  function renderItem(item) {
+    if (item.type === 'elimination') {
+      return <><span className="text-red-400 font-semibold">{item.eliminatorName}</span> 💦 eliminated <span className="text-cyan-400 font-semibold">{item.targetName}</span></>
+    }
+    if (item.type === 'team_eliminated') {
+      return <><span className="text-orange-400 font-semibold">{item.teamName}</span> 💀 has been wiped out!</>
+    }
+    if (item.type === 'game_ended') {
+      return <>🏆 <span className="text-yellow-400 font-semibold">{item.winnerTeamName}</span> wins the game!</>
+    }
+    return null
+  }
+
+  function icon(type) {
+    if (type === 'elimination') return '💧'
+    if (type === 'team_eliminated') return '☠️'
+    if (type === 'game_ended') return '🏆'
+    return '📢'
+  }
+
+  function timeAgo(seconds) {
+    if (!seconds) return ''
+    const diff = Math.floor(Date.now() / 1000) - seconds
+    if (diff < 60) return `${diff}s ago`
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+    return `${Math.floor(diff / 3600)}h ago`
+  }
+
+  return (
+    <div className="space-y-3">
+      {sorted.length === 0 ? (
+        <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 text-center">
+          <p className="text-slate-500 italic text-sm">No events yet — the hunt has just begun...</p>
+        </div>
+      ) : sorted.map(item => (
+        <div key={item.id} className={`flex items-start gap-3 rounded-xl px-4 py-3 border ${
+          item.type === 'game_ended' ? 'bg-yellow-950 border-yellow-700' :
+          item.type === 'team_eliminated' ? 'bg-orange-950 border-orange-800' :
+          'bg-slate-800 border-slate-700'
+        }`}>
+          <span className="text-xl flex-shrink-0 mt-0.5">{icon(item.type)}</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-white">{renderItem(item)}</p>
+          </div>
+          <span className="text-slate-500 text-xs flex-shrink-0 mt-0.5">{timeAgo(item.createdAt?.seconds)}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ─── Chat Tab ────────────────────────────────────────────────────────────────
+
+function ChatTab({ messages, myPlayer, myTeam, gameId, setError }) {
+  const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const bottomRef = useState(null)
+
+  const sorted = [...messages].sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0))
+
+  async function handleSend(e) {
+    e.preventDefault()
+    if (!text.trim() || !myPlayer || sending) return
+    setSending(true)
+    try {
+      await addDoc(collection(db, 'games', gameId, 'messages'), {
+        playerId: myPlayer.id,
+        playerName: myPlayer.name,
+        teamName: myTeam?.name || '',
+        text: text.trim(),
+        createdAt: serverTimestamp(),
+      })
+      setText('')
+    } catch (err) {
+      setError('Failed to send message.')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  function timeStr(seconds) {
+    if (!seconds) return ''
+    return new Date(seconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3 max-h-96 overflow-y-auto">
+        {sorted.length === 0 ? (
+          <p className="text-slate-500 italic text-sm text-center">No messages yet. Say hi!</p>
+        ) : sorted.map(msg => {
+          const isMe = msg.playerId === myPlayer?.id
+          return (
+            <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xs text-slate-400 font-semibold">{msg.playerName}</span>
+                <span className="text-xs text-slate-600">{msg.teamName}</span>
+                <span className="text-xs text-slate-600">{timeStr(msg.createdAt?.seconds)}</span>
+              </div>
+              <div className={`px-3 py-2 rounded-xl text-sm max-w-xs break-words ${
+                isMe ? 'bg-cyan-700 text-white' : 'bg-slate-700 text-white'
+              }`}>
+                {msg.text}
+              </div>
+            </div>
+          )
+        })}
+        <div ref={el => { if (el) el.scrollIntoView({ behavior: 'smooth' }) }} />
+      </div>
+
+      <form onSubmit={handleSend} className="flex gap-2">
+        <input
+          type="text"
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder={myPlayer ? 'Type a message...' : 'Join the game to chat'}
+          disabled={!myPlayer}
+          maxLength={200}
+          className="flex-1 bg-slate-800 border border-slate-700 text-white rounded-xl px-4 py-2.5 text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={!text.trim() || !myPlayer || sending}
+          className="bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white font-bold px-4 py-2.5 rounded-xl transition-colors text-sm"
+        >
+          Send
+        </button>
+      </form>
+    </div>
+  )
+}
+
 // ─── Main Game Page ───────────────────────────────────────────────────────────
 
 export default function Game() {
@@ -466,10 +623,14 @@ export default function Game() {
   const [players, setPlayers] = useState([])
   const [teams, setTeams] = useState([])
   const [eliminations, setEliminations] = useState([])
+  const [activity, setActivity] = useState([])
+  const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('myteam')
   const [error, setError] = useState('')
   const [showGameOverOverlay, setShowGameOverOverlay] = useState(true)
+  const [lastSeenActivity, setLastSeenActivity] = useState(0)
+  const [lastSeenMessages, setLastSeenMessages] = useState(0)
 
   const userId = getUserId()
   const session = getPlayerSession(gameId)
@@ -504,6 +665,20 @@ export default function Game() {
     return unsub
   }, [gameId])
 
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'games', gameId, 'activity'), snap => {
+      setActivity(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    })
+    return unsub
+  }, [gameId])
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'games', gameId, 'messages'), snap => {
+      setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    })
+    return unsub
+  }, [gameId])
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center">
@@ -521,10 +696,21 @@ export default function Game() {
     e => e.targetPlayerId === myPlayer?.id && e.status === 'pending'
   )
 
+  const newActivity = activity.length - lastSeenActivity
+  const newMessages = messages.length - lastSeenMessages
+
+  function switchTab(tabId) {
+    setActiveTab(tabId)
+    if (tabId === 'feed') setLastSeenActivity(activity.length)
+    if (tabId === 'chat') setLastSeenMessages(messages.length)
+  }
+
   const tabs = [
     { id: 'myteam', label: 'My Team' },
-    { id: 'eliminations', label: 'Eliminations', badge: pendingIncoming.length },
-    { id: 'leaderboard', label: 'Leaderboard' },
+    { id: 'eliminations', label: 'Elims', badge: pendingIncoming.length },
+    { id: 'feed', label: 'Feed', badge: activeTab !== 'feed' ? newActivity : 0 },
+    { id: 'chat', label: 'Chat', badge: activeTab !== 'chat' ? newMessages : 0 },
+    { id: 'leaderboard', label: 'Scores' },
   ]
 
   const winnerTeam = game?.winnerTeamId ? teams.find(t => t.id === game.winnerTeamId) : null
@@ -628,7 +814,7 @@ export default function Game() {
           {tabs.map(tab => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => switchTab(tab.id)}
               className={`flex-1 py-3 text-sm font-semibold transition-colors relative ${
                 activeTab === tab.id
                   ? 'text-cyan-400 border-b-2 border-cyan-400'
@@ -667,6 +853,18 @@ export default function Game() {
             gameId={gameId}
             setError={setError}
             isAdmin={isAdmin}
+          />
+        )}
+        {activeTab === 'feed' && (
+          <FeedTab activity={activity} />
+        )}
+        {activeTab === 'chat' && (
+          <ChatTab
+            messages={messages}
+            myPlayer={myPlayer}
+            myTeam={myTeam}
+            gameId={gameId}
+            setError={setError}
           />
         )}
         {activeTab === 'leaderboard' && (
