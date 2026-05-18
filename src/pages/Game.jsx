@@ -228,7 +228,7 @@ function EliminationsTab({ myPlayer, players, teams, eliminations, gameId, setEr
     }
   }
 
-  async function handleResolveDispute(elimination) {
+  async function handleDismissDispute(elimination) {
     try {
       const { updateDoc } = await import('firebase/firestore')
       await updateDoc(doc(db, 'games', gameId, 'eliminations', elimination.id), {
@@ -236,7 +236,62 @@ function EliminationsTab({ myPlayer, players, teams, eliminations, gameId, setEr
         disputeMessage: '',
       })
     } catch (err) {
-      setError('Failed to resolve dispute.')
+      setError('Failed to dismiss dispute.')
+    }
+  }
+
+  async function handleRestorePlayer(elimination) {
+    try {
+      const batch = writeBatch(db)
+      const targetPlayer = players.find(p => p.id === elimination.targetPlayerId)
+      const eliminator = players.find(p => p.id === elimination.eliminatorPlayerId)
+
+      // Un-eliminate the player
+      batch.update(doc(db, 'games', gameId, 'players', elimination.targetPlayerId), { eliminated: false })
+
+      // Decrement eliminator's count
+      if (eliminator) {
+        batch.update(doc(db, 'games', gameId, 'players', eliminator.id), {
+          eliminationCount: Math.max(0, (eliminator.eliminationCount || 0) - 1),
+        })
+        const eliminatorTeam = teams.find(t => t.id === eliminator.teamId)
+        if (eliminatorTeam) {
+          batch.update(doc(db, 'games', gameId, 'teams', eliminatorTeam.id), {
+            eliminationCount: Math.max(0, (eliminatorTeam.eliminationCount || 0) - 1),
+          })
+        }
+      }
+
+      // If their team was eliminated, restore it and fix the target chain
+      const targetTeam = teams.find(t => t.id === targetPlayer?.teamId)
+      if (targetTeam?.eliminated) {
+        batch.update(doc(db, 'games', gameId, 'teams', targetTeam.id), { eliminated: false })
+        // Find the team that took over this team's target and point them back
+        const teamThatTookTarget = teams.find(t =>
+          t.id !== targetTeam.id && t.targetTeamId === targetTeam.targetTeamId && !t.eliminated
+        )
+        if (teamThatTookTarget) {
+          batch.update(doc(db, 'games', gameId, 'teams', teamThatTookTarget.id), {
+            targetTeamId: targetTeam.id,
+          })
+        }
+        // If game ended because of this, reopen it
+        if (game?.status === 'ended') {
+          batch.update(doc(db, 'games', gameId), { status: 'active', winnerTeamId: null })
+        }
+      }
+
+      // Clear the dispute
+      batch.update(doc(db, 'games', gameId, 'eliminations', elimination.id), {
+        disputed: false,
+        disputeMessage: '',
+        status: 'overturned',
+      })
+
+      await batch.commit()
+    } catch (err) {
+      setError('Failed to restore player.')
+      console.error(err)
     }
   }
 
@@ -311,12 +366,20 @@ function EliminationsTab({ myPlayer, players, teams, eliminations, gameId, setEr
                     <span className="text-cyan-400 font-semibold">{getPlayerName(e.targetPlayerId)}</span>
                   </p>
                   <p className="text-orange-300 text-xs italic">"{e.disputeMessage}"</p>
-                  <button
-                    onClick={() => handleResolveDispute(e)}
-                    className="text-xs bg-purple-700 hover:bg-purple-600 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
-                  >
-                    ✓ Dismiss Dispute
-                  </button>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      onClick={() => handleRestorePlayer(e)}
+                      className="text-xs bg-green-700 hover:bg-green-600 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      ↩ Restore Player
+                    </button>
+                    <button
+                      onClick={() => handleDismissDispute(e)}
+                      className="text-xs bg-slate-600 hover:bg-slate-500 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      ✓ Elimination Stands
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
