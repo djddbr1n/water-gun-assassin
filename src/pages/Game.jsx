@@ -87,20 +87,39 @@ function MyTeamTab({ myPlayer, myTeam, targetTeam, players, teams, eliminations,
     setMarkLoading(prev => ({ ...prev, [targetPlayer.id]: true }))
     setError('')
     try {
-      // Check there's no pending elimination for this target already
-      const pending = eliminations.find(
-        e => e.targetPlayerId === targetPlayer.id && e.status === 'pending'
-      )
-      if (pending) {
-        setError('There is already a pending elimination for this player.')
-        return
-      }
-      await addDoc(collection(db, 'games', gameId, 'eliminations'), {
+      const batch = writeBatch(db)
+
+      // Create elimination record as immediately confirmed
+      const elimRef = doc(collection(db, 'games', gameId, 'eliminations'))
+      batch.set(elimRef, {
         eliminatorPlayerId: myPlayer.id,
         targetPlayerId: targetPlayer.id,
-        status: 'pending',
+        status: 'confirmed',
+        disputed: false,
+        disputeMessage: '',
         createdAt: serverTimestamp(),
       })
+
+      // Mark target as eliminated
+      batch.update(doc(db, 'games', gameId, 'players', targetPlayer.id), { eliminated: true })
+
+      // Increment eliminator count
+      batch.update(doc(db, 'games', gameId, 'players', myPlayer.id), {
+        eliminationCount: (myPlayer.eliminationCount || 0) + 1,
+      })
+
+      // Increment eliminator's team count
+      const myTeamDoc = teams.find(t => t.id === myPlayer.teamId)
+      if (myTeamDoc) {
+        batch.update(doc(db, 'games', gameId, 'teams', myTeamDoc.id), {
+          eliminationCount: (myTeamDoc.eliminationCount || 0) + 1,
+        })
+      }
+
+      // Cascade: check if target team is fully eliminated
+      await handleEliminationCascade(batch, gameId, targetPlayer.id, players, teams)
+
+      await batch.commit()
     } catch (err) {
       setError('Failed to report elimination.')
       console.error(err)
@@ -149,9 +168,6 @@ function MyTeamTab({ myPlayer, myTeam, targetTeam, players, teams, eliminations,
         ) : (
           <div className="space-y-3">
             {targetTeamMembers.map(p => {
-              const pendingForTarget = eliminations.find(
-                e => e.targetPlayerId === p.id && e.status === 'pending'
-              )
               return (
                 <div key={p.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg ${p.eliminated ? 'bg-slate-800 opacity-50' : 'bg-slate-700'}`}>
                   <span className={`text-sm font-medium flex-1 ${p.eliminated ? 'line-through text-slate-500' : 'text-white'}`}>
@@ -159,15 +175,13 @@ function MyTeamTab({ myPlayer, myTeam, targetTeam, players, teams, eliminations,
                   </span>
                   {p.eliminated ? (
                     <span className="text-xs text-red-400 font-semibold">💀 OUT</span>
-                  ) : pendingForTarget ? (
-                    <span className="text-xs text-yellow-400 font-semibold">⏳ Pending...</span>
                   ) : (
                     <button
                       onClick={() => handleMarkEliminated(p)}
                       disabled={markLoading[p.id]}
                       className="text-xs bg-red-700 hover:bg-red-600 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
                     >
-                      {markLoading[p.id] ? 'Reporting...' : '💦 I got them!'}
+                      {markLoading[p.id] ? 'Eliminating...' : '💦 Eliminated!'}
                     </button>
                   )}
                 </div>
@@ -182,144 +196,133 @@ function MyTeamTab({ myPlayer, myTeam, targetTeam, players, teams, eliminations,
 
 // ─── Eliminations Tab ────────────────────────────────────────────────────────
 
-function EliminationsTab({ myPlayer, players, teams, eliminations, gameId, setError }) {
-  const [actionLoading, setActionLoading] = useState({})
+function EliminationsTab({ myPlayer, players, teams, eliminations, gameId, setError, isAdmin }) {
+  const [disputeMsg, setDisputeMsg] = useState({})
+  const [disputeLoading, setDisputeLoading] = useState({})
 
-  const incoming = eliminations.filter(
-    e => e.targetPlayerId === myPlayer?.id && e.status === 'pending'
-  )
-  const outgoing = eliminations.filter(
-    e => e.eliminatorPlayerId === myPlayer?.id
-  )
+  const myEliminations = eliminations.filter(e => e.eliminatorPlayerId === myPlayer?.id)
+  const myDeaths = eliminations.filter(e => e.targetPlayerId === myPlayer?.id && e.status === 'confirmed')
+  const allDisputes = eliminations.filter(e => e.disputed)
 
   function getPlayerName(playerId) {
     return players.find(p => p.id === playerId)?.name || 'Unknown'
   }
 
-  async function handleConfirm(elimination) {
-    setActionLoading(prev => ({ ...prev, [elimination.id]: 'confirming' }))
-    setError('')
-    try {
-      const batch = writeBatch(db)
-
-      // Mark elimination confirmed
-      batch.update(doc(db, 'games', gameId, 'eliminations', elimination.id), { status: 'confirmed' })
-
-      // Mark target player as eliminated
-      batch.update(doc(db, 'games', gameId, 'players', elimination.targetPlayerId), { eliminated: true })
-
-      // Increment eliminator's count
-      const eliminator = players.find(p => p.id === elimination.eliminatorPlayerId)
-      if (eliminator) {
-        batch.update(doc(db, 'games', gameId, 'players', elimination.eliminatorPlayerId), {
-          eliminationCount: (eliminator.eliminationCount || 0) + 1,
-        })
-        // Also update the eliminator's team count
-        const eliminatorTeam = teams.find(t => t.id === eliminator.teamId)
-        if (eliminatorTeam) {
-          batch.update(doc(db, 'games', gameId, 'teams', eliminatorTeam.id), {
-            eliminationCount: (eliminatorTeam.eliminationCount || 0) + 1,
-          })
-        }
-      }
-
-      // Handle cascade: check if team fully eliminated, update targeter, check game over
-      await handleEliminationCascade(batch, gameId, elimination.targetPlayerId, players, teams)
-
-      await batch.commit()
-    } catch (err) {
-      setError('Failed to confirm elimination.')
-      console.error(err)
-    } finally {
-      setActionLoading(prev => ({ ...prev, [elimination.id]: null }))
-    }
-  }
-
   async function handleDispute(elimination) {
-    setActionLoading(prev => ({ ...prev, [elimination.id]: 'disputing' }))
+    const msg = (disputeMsg[elimination.id] || '').trim()
+    if (!msg) return
+    setDisputeLoading(prev => ({ ...prev, [elimination.id]: true }))
     setError('')
     try {
-      const batch = writeBatch(db)
-      batch.update(doc(db, 'games', gameId, 'eliminations', elimination.id), { status: 'disputed' })
-      await batch.commit()
+      const { updateDoc } = await import('firebase/firestore')
+      await updateDoc(doc(db, 'games', gameId, 'eliminations', elimination.id), {
+        disputed: true,
+        disputeMessage: msg,
+      })
+      setDisputeMsg(prev => ({ ...prev, [elimination.id]: '' }))
     } catch (err) {
-      setError('Failed to dispute elimination.')
+      setError('Failed to file dispute.')
       console.error(err)
     } finally {
-      setActionLoading(prev => ({ ...prev, [elimination.id]: null }))
+      setDisputeLoading(prev => ({ ...prev, [elimination.id]: false }))
     }
   }
 
-  const statusBadge = (status) => {
-    if (status === 'pending') return <span className="text-xs bg-yellow-900 text-yellow-300 px-2 py-0.5 rounded-full">Pending</span>
-    if (status === 'confirmed') return <span className="text-xs bg-green-900 text-green-300 px-2 py-0.5 rounded-full">Confirmed</span>
-    if (status === 'disputed') return <span className="text-xs bg-red-900 text-red-300 px-2 py-0.5 rounded-full">Disputed</span>
-    return null
+  async function handleResolveDispute(elimination) {
+    try {
+      const { updateDoc } = await import('firebase/firestore')
+      await updateDoc(doc(db, 'games', gameId, 'eliminations', elimination.id), {
+        disputed: false,
+        disputeMessage: '',
+      })
+    } catch (err) {
+      setError('Failed to resolve dispute.')
+    }
   }
 
   return (
     <div className="space-y-6">
-      {/* Incoming */}
+      {/* My Eliminations */}
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
-        <h3 className="text-lg font-bold text-white mb-1">Incoming Claims</h3>
-        <p className="text-slate-400 text-xs mb-4">Someone says they eliminated you — confirm or dispute.</p>
-        {incoming.length === 0 ? (
-          <p className="text-slate-500 italic text-sm">No pending elimination claims against you.</p>
+        <h3 className="text-lg font-bold text-white mb-1">My Eliminations</h3>
+        <p className="text-slate-400 text-xs mb-4">Players you've eliminated this game.</p>
+        {myEliminations.length === 0 ? (
+          <p className="text-slate-500 italic text-sm">No eliminations yet — get out there!</p>
         ) : (
-          <div className="space-y-3">
-            {incoming.map(e => (
-              <div key={e.id} className="bg-slate-700 rounded-lg px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
-                <div className="flex-1">
-                  <p className="text-white text-sm">
-                    <span className="font-semibold text-red-400">{getPlayerName(e.eliminatorPlayerId)}</span>
-                    {' '}says they eliminated you.
-                  </p>
-                </div>
-                {myPlayer?.eliminated ? (
-                  <span className="text-xs text-slate-400">Already eliminated</span>
-                ) : (
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleConfirm(e)}
-                      disabled={actionLoading[e.id]}
-                      className="text-xs bg-green-700 hover:bg-green-600 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
-                    >
-                      {actionLoading[e.id] === 'confirming' ? 'Confirming...' : '✓ Confirm'}
-                    </button>
-                    <button
-                      onClick={() => handleDispute(e)}
-                      disabled={actionLoading[e.id]}
-                      className="text-xs bg-slate-600 hover:bg-slate-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
-                    >
-                      {actionLoading[e.id] === 'disputing' ? 'Disputing...' : '✗ Dispute'}
-                    </button>
-                  </div>
-                )}
+          <div className="space-y-2">
+            {myEliminations.map(e => (
+              <div key={e.id} className="bg-slate-700 rounded-lg px-4 py-3 flex items-center gap-3">
+                <p className="text-white text-sm flex-1">
+                  💧 <span className="font-semibold text-cyan-400">{getPlayerName(e.targetPlayerId)}</span>
+                </p>
+                {e.disputed && <span className="text-xs bg-orange-900 text-orange-300 px-2 py-0.5 rounded-full">Disputed</span>}
               </div>
             ))}
           </div>
         )}
       </div>
 
-      {/* Outgoing */}
-      <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
-        <h3 className="text-lg font-bold text-white mb-1">My Elimination Claims</h3>
-        <p className="text-slate-400 text-xs mb-4">Eliminations you've reported.</p>
-        {outgoing.length === 0 ? (
-          <p className="text-slate-500 italic text-sm">You haven't reported any eliminations yet.</p>
-        ) : (
-          <div className="space-y-2">
-            {outgoing.map(e => (
-              <div key={e.id} className="bg-slate-700 rounded-lg px-4 py-3 flex items-center gap-3">
-                <p className="text-white text-sm flex-1">
-                  Eliminated <span className="font-semibold text-cyan-400">{getPlayerName(e.targetPlayerId)}</span>
-                </p>
-                {statusBadge(e.status)}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {/* Dispute my own elimination */}
+      {myDeaths.map(e => (
+        <div key={e.id} className="bg-slate-800 border border-orange-800 rounded-xl p-5">
+          <h3 className="text-lg font-bold text-orange-400 mb-1">⚠️ You were eliminated</h3>
+          <p className="text-slate-400 text-xs mb-3">
+            <span className="text-red-400 font-semibold">{getPlayerName(e.eliminatorPlayerId)}</span> marked you as eliminated.
+            {e.disputed ? ' Your dispute has been filed.' : ' Think this was wrong? File a dispute below.'}
+          </p>
+          {!e.disputed && (
+            <div className="space-y-2">
+              <textarea
+                value={disputeMsg[e.id] || ''}
+                onChange={ev => setDisputeMsg(prev => ({ ...prev, [e.id]: ev.target.value }))}
+                placeholder="Explain why this elimination is incorrect..."
+                rows={3}
+                className="w-full bg-slate-700 border border-slate-600 text-white text-sm rounded-lg px-3 py-2 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+              />
+              <button
+                onClick={() => handleDispute(e)}
+                disabled={disputeLoading[e.id] || !(disputeMsg[e.id] || '').trim()}
+                className="w-full bg-orange-700 hover:bg-orange-600 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-semibold py-2 rounded-lg text-sm transition-colors"
+              >
+                {disputeLoading[e.id] ? 'Filing...' : '🚩 File Dispute'}
+              </button>
+            </div>
+          )}
+          {e.disputed && (
+            <div className="bg-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 italic">"{e.disputeMessage}"</div>
+          )}
+        </div>
+      ))}
+
+      {/* Admin: Disputes panel */}
+      {isAdmin && (
+        <div className="bg-slate-800 border border-purple-800 rounded-xl p-5">
+          <h3 className="text-lg font-bold text-purple-400 mb-1">🛡️ Admin — Open Disputes</h3>
+          <p className="text-slate-400 text-xs mb-4">Review disputed eliminations and resolve them.</p>
+          {allDisputes.length === 0 ? (
+            <p className="text-slate-500 italic text-sm">No open disputes.</p>
+          ) : (
+            <div className="space-y-3">
+              {allDisputes.map(e => (
+                <div key={e.id} className="bg-slate-700 rounded-lg px-4 py-3 space-y-2">
+                  <p className="text-white text-sm">
+                    <span className="text-red-400 font-semibold">{getPlayerName(e.eliminatorPlayerId)}</span>
+                    {' eliminated '}
+                    <span className="text-cyan-400 font-semibold">{getPlayerName(e.targetPlayerId)}</span>
+                  </p>
+                  <p className="text-orange-300 text-xs italic">"{e.disputeMessage}"</p>
+                  <button
+                    onClick={() => handleResolveDispute(e)}
+                    className="text-xs bg-purple-700 hover:bg-purple-600 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    ✓ Dismiss Dispute
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -403,6 +406,7 @@ export default function Game() {
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('myteam')
   const [error, setError] = useState('')
+  const [showGameOverOverlay, setShowGameOverOverlay] = useState(true)
 
   const userId = getUserId()
   const session = getPlayerSession(gameId)
@@ -461,11 +465,12 @@ export default function Game() {
   ]
 
   const winnerTeam = game?.winnerTeamId ? teams.find(t => t.id === game.winnerTeamId) : null
+  const isAdmin = game?.adminUserId === userId
 
   return (
     <div className="min-h-screen bg-slate-900 px-4 py-8">
       {/* Game Over Overlay */}
-      {game?.status === 'ended' && (
+      {game?.status === 'ended' && showGameOverOverlay && (
         <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50 p-4">
           <div className="bg-slate-800 border border-cyan-500 rounded-3xl p-10 text-center max-w-md w-full shadow-2xl">
             <div className="text-7xl mb-4">🎉</div>
@@ -478,7 +483,7 @@ export default function Game() {
             </div>
             <div className="text-4xl mb-4">🔫💦🎊🏆💧</div>
             <button
-              onClick={() => setActiveTab('leaderboard')}
+              onClick={() => { setShowGameOverOverlay(false); setActiveTab('leaderboard') }}
               className="w-full bg-cyan-500 hover:bg-cyan-400 text-white font-bold py-3 rounded-xl transition-colors"
             >
               View Final Leaderboard
@@ -598,6 +603,7 @@ export default function Game() {
             eliminations={eliminations}
             gameId={gameId}
             setError={setError}
+            isAdmin={isAdmin}
           />
         )}
         {activeTab === 'leaderboard' && (
